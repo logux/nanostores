@@ -1,8 +1,9 @@
 import FakeTimers from '@sinonjs/fake-timers'
-import { deepStrictEqual, equal } from 'node:assert'
+import { deepStrictEqual, equal, throws } from 'node:assert'
 import { test } from 'node:test'
 
-import { atom, onMount } from '../index.js'
+import { atom, computed, onMount } from '../index.js'
+import { batch } from './index.js'
 
 let clock = FakeTimers.install()
 
@@ -398,6 +399,69 @@ test('prevents notifying when new value is referentially equal to old one', () =
   clock.runAll()
 })
 
+test('custom isEqual: notifies when returning false, even when values are the same', () => {
+  let events: (string | undefined)[] = []
+  let $store = atom('old')
+  $store.isEqual = () => false
+
+  let unbind = $store.subscribe(value => {
+    events.push(value)
+  })
+  deepStrictEqual(events, ['old'])
+
+  $store.set('old')
+  deepStrictEqual(events, ['old', 'old'])
+
+  $store.set('new')
+  deepStrictEqual(events, ['old', 'old', 'new'])
+
+  unbind()
+  clock.runAll()
+})
+
+test('custom isEqual: does not notify when returning true, even when values are different', () => {
+  let events: (string | undefined)[] = []
+  let $store = atom('old')
+  $store.isEqual = () => true
+
+  let unbind = $store.subscribe(value => {
+    events.push(value)
+  })
+  deepStrictEqual(events, ['old'])
+
+  $store.set('new')
+  deepStrictEqual(events, ['old'])
+
+  unbind()
+  clock.runAll()
+})
+
+// This test fails when using === to compare instead of Object.is
+test('listener is not called when value is set to NaN a second time', () => {
+  let events = ""
+  let $store = atom(NaN)
+  let unbind = $store.subscribe(value => {
+    events += value + " "
+  })
+  $store.set(NaN)
+  deepStrictEqual(events, "NaN ")
+  unbind()
+  clock.runAll()
+})
+
+// This test fails when using === to compare instead of Object.is
+test('listener is called when value changes from -0 to +0', () => {
+  let events: number[] = []
+  let $store = atom(-0)
+  let unbind = $store.subscribe(value => {
+    events.push(value)
+  })
+  $store.set(+0)
+  deepStrictEqual(events, [-0, +0])
+  unbind()
+  clock.runAll()
+})
+
 test('can use previous value in listeners', () => {
   let events: (number | undefined)[] = []
   let $store = atom(0)
@@ -423,4 +487,199 @@ test('can use previous value in subscribers', () => {
   deepStrictEqual(events, [undefined, 0, 1])
   unbind()
   clock.runAll()
+})
+
+test('without batch', () => {
+  let events = ""
+  let $a = atom("a1")
+  let $b = atom("b1")
+  let unbind = $a.subscribe(() => {
+    events += $a.get() + $b.get() + " "
+  })
+  $a.set("a2")
+  $b.set("b2")
+  equal(events, 'a1b1 a2b1 ')
+  unbind()
+  clock.runAll()
+})
+
+test('batch', () => {
+  let events = ""
+  let $a = atom("a1")
+  let $b = atom("b1")
+  let unbind = $a.subscribe(() => {
+    events += $a.get() + $b.get() + " "
+  })
+  batch(() => {
+    $a.set("a2")
+    $b.set("b2")
+  })
+
+  equal(events, 'a1b1 a2b2 ')
+  unbind()
+  clock.runAll()
+})
+
+test('nested batch', () => {
+  let events = ""
+  let $a = atom("a1")
+  let $b = atom("b1")
+  let unbind = $a.subscribe(() => {
+    events += $a.get() + $b.get() + " "
+  })
+  batch(() => {
+    $a.set("a2")
+    batch(() => {
+      $b.set("b2")
+    })
+  })
+
+  equal(events, 'a1b1 a2b2 ')
+  unbind()
+  clock.runAll()
+})
+
+test('batch started from listener', () => {
+  let events = ""
+  let $a = atom("a1")
+  let $b = atom("b1")
+  let unbind = $a.subscribe(() => {
+    events += $a.get() + $b.get() + " "
+  })
+  let $c = atom()
+  $c.listen(() => {
+    batch(() => {
+      $a.set("a2")
+      $b.set("b2")
+    })
+  })
+  $c.set("foo")
+
+  equal(events, 'a1b1 a2b2 ')
+  unbind()
+  clock.runAll()
+})
+
+test('batch with computed', () => {
+  let events = ""
+  let $a = atom("a1")
+  let $b = atom("b1")
+  let $c = computed([$a, $b], (a, b) => {
+    events += a + b + " "
+  })
+  $c.get()
+  batch(() => {
+    $a.set("a2")
+    $b.set("b2")
+  })
+  equal(events, 'a1b1 a2b2 ')
+  clock.runAll()
+})
+
+test('calling batch in a listener does not re-run the batched listeners', () => {
+  let events = ""
+  let $a = atom("a1")
+  // Override isEqual so listeners will always be called, even if value hasn't changed
+  $a.isEqual = () => false
+  let unbind = $a.listen(value => {
+    events += value
+    batch(() => {})
+  })
+  batch(() => {
+    $a.set("a2")
+    $a.set("a3")
+  })
+
+  // a3 is added twice because of our custom isEqual function
+  equal(events, 'a3a3')
+  unbind()
+  clock.runAll()
+})
+
+test('batch queue is cleared if a listener throws an exception', () => {
+  let events = ""
+  let $a = atom("a1")
+  let $b = atom("b1")
+  let unbindA = $a.listen(value => {
+    events += value
+    if (value === "a2") throw new Error("foo")
+  })
+  let unbindB = $b.listen(value => {
+    events += value
+  })
+  throws(() => {
+    batch(() => {
+      $a.set("a2")
+      $b.set("b2")
+    })
+  }, /foo/)
+  $a.set("a3")
+
+  equal(events, "a2a3")
+  unbindA()
+  unbindB()
+  clock.runAll()
+})
+
+// If values are stored in the queue at the time notify() is called, the value passed to the listener will be stale.
+// If that is fixed, but special handling doesn't exist, the listener will be called twice.
+test('non-stale value passed to listener and listener only called once when atom is modified with other listeners already later in the queue', () => {
+  let events = ""
+  let $a = atom('0')
+  let $event = atom()
+  $event.listen(() => {
+    $a.set('2')
+  })
+  $a.listen((value) => {
+    events += value
+  })
+  batch(() => {
+    $event.set("foo")
+    $a.set('1')
+  })
+  equal(events, '2')
+})
+
+test('listener only called once when atom is modified twice in batch', () => {
+  let events = ""
+  let $atom = atom('1')
+  $atom.listen((value) => {
+    events += value
+  })
+  batch(() => {
+    $atom.set('2')
+    $atom.set('3')
+  })
+  equal(events, '3')
+})
+
+test('listener only called once when atom is modified twice in a listener (implicit batch)', () => {
+  let events = ""
+  let $event = atom()
+  let $atom = atom('1')
+  $atom.listen((value) => {
+    events += value
+  })
+  $event.listen(() => {
+    $atom.set('2')
+    $atom.set('3')
+  })
+  $event.set('foo')
+  equal(events, '3')
+})
+
+test('listeners see different oldValue for same batch update based on when they subscribed', () => {
+  let events = ""
+  let $atom = atom('a')
+  $atom.listen((value, oldValue) => {
+    events += value + oldValue + '1 '
+  })
+  batch(() => {
+    $atom.set('b')
+    $atom.listen((value, oldValue) => {
+      events += value + oldValue + '2 '
+    })
+    $atom.set('c')
+  })
+  equal(events, 'ca1 cb2 ')
 })

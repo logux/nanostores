@@ -6,10 +6,9 @@ export { getPath, setByKey, setPath } from './path.js'
 export function deepMap(initial = {}) {
   let $deepMap = atom(initial)
   $deepMap.setKey = (key, value) => {
-    if (getPath($deepMap.value, key) !== value) {
-      let oldValue = $deepMap.value
+    if (!$deepMap.isEqual(getPath($deepMap.value, key), value)) {
       $deepMap.value = setPath($deepMap.value, key, value)
-      $deepMap.notify(oldValue, key)
+      $deepMap.notify(key)
     }
   }
   return $deepMap

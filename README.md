@@ -210,20 +210,20 @@ Setting `undefined` will remove optional key:
 $profile.setKey('email', undefined)
 ```
 
-Store’s listeners will receive third argument with changed key.
+Deprecated: a store’s listeners will receive a third argument `changedKey` when
+the store is updated using `setKey`. However, if the store is updated using
+`set`, `changedKey` will be `undefined`. And if the store is updated multiple
+times inside a batch, `changedKey` will only contain the value from the first
+update during the batch. So, it's best not to rely on `changedKey` to detect if
+a key has changed.
+
+`listenKeys` is a better way to listen for specific keys of the store being
+changed. The callback will fire whenever the specified keys are changed
+(regardless of whether they were updated using `setKey` or `set`).
 
 ```ts
-$profile.listen((profile, oldProfile, changed) => {
-  console.log(`${changed} new value ${profile[changed]}`)
-})
-```
-
-You can also listen for specific keys of the store being changed, using
-`listenKeys` and `subscribeKeys`.
-
-```ts
-listenKeys($profile, ['name'], (value, oldValue, changed) => {
-  console.log(`$profile.Name new value ${value.name}`)
+listenKeys($profile, ['name'], (value, oldValue) => {
+  console.log(`$profile.name new value ${value.name}`)
 })
 ```
 
@@ -232,6 +232,10 @@ also call listeners immediately during the subscription.
 Please note that when using subscribe for store changes, the initial evaluation
 of the callback has undefined old value and changed key.
 
+If you want to listen to keys beyond the top level, you can use
+`listenKeyPaths` and `subscribeKeyPaths`. These work just like `listenKeys` and
+`subscribeKeys`, but they take a key *path* (like `foo[0].bar`, as used in
+`deepMap`).
 
 ### Deep Maps
 
@@ -322,7 +326,7 @@ it('is anonymous from the beginning', () => {
 
 ### Computed Stores
 
-Computed store is based on other store’s value.
+Computed store is based on other stores' values.
 
 ```ts
 import { computed } from 'nanostores'
@@ -331,6 +335,17 @@ import { $users } from './users.js'
 export const $admins = computed($users, users => {
   // This callback will be called on every `users` changes
   return users.filter(user => user.isAdmin)
+})
+```
+
+It can be calculated from multiple stores:
+
+```ts
+import { $lastVisit } from './lastVisit.js'
+import { $posts } from './posts.js'
+
+export const $newPosts = computed([$lastVisit, $posts], (lastVisit, posts) => {
+  return posts.filter(post => post.publishedAt > lastVisit)
 })
 ```
 
@@ -347,10 +362,55 @@ export const $user = computed($userId, userId => task(async () => {
 }))
 ```
 
-By default, `computed` stores update _each_ time any of their dependencies
-gets updated. If you are fine with waiting until the end of a tick, you can
-use `batched`. The only difference with `computed` is that it will wait until
-the end of a tick to update itself.
+### Batching
+By default, listeners run immediately when a store's value is changed. If you
+are changing multiple stores together, you can use `batch` to delay the
+listeners from running until the end of the batch callback. That way, if a
+store's value changes multiple times, or multiple dependencies of a `computed`
+change, their listeners will only be called once at the end of the batch.
+
+```ts
+import { batch } from 'nanostores'
+
+const $sortBy = atom('id')
+const $categoryId = atom('')
+
+export const $link = computed([$sortBy, $categoryId], (sortBy, categoryId) => {
+  return `/api/entities?sortBy=${sortBy}&categoryId=${categoryId}`
+})
+
+// $link will only update once even though you changed its dependencies twice
+export function resetFilters () {
+  batch(() => {
+    $sortBy.set('date')
+    $categoryIdFilter.set('1')
+  })
+}
+```
+
+Listener callbacks are automatically batched.
+
+```ts
+const $atom1 = atom(0)
+const $atom2 = atom(0)
+$atom2.listen((value) => {
+  console.log(value)
+})
+$atom1.subscribe(() => {
+  // This callback is automatically batched, no need to use `batch`.
+  // The listener for $atom2 will only be called once at the end of this callback.
+  $atom2.set(1)
+  doStuff()
+  $atom2.set(2)
+})
+```
+
+Sometimes you want to ensure that a computed store's updates are batched even
+if dependencies are updated outside of a `batch` callback (e.g., in a library
+where you don't control how dependencies are updated). In that case, you can
+define your computed store using `batched` instead of `computed`. This will
+cause the store to wait until the end of the next event loop tick before
+recomputing the value.
 
 ```ts
 import { batched } from 'nanostores'
@@ -362,24 +422,12 @@ export const $link = batched([$sortBy, $categoryId], (sortBy, categoryId) => {
   return `/api/entities?sortBy=${sortBy}&categoryId=${categoryId}`
 })
 
-// `batched` will update only once even you changed two stores
+// $link will update only once even though you changed its dependencies twice
 export function resetFilters () {
   $sortBy.set('date')
   $categoryIdFilter.set('1')
 }
 ```
-
-Both `computed` and `batched` can be calculated from multiple stores:
-
-```ts
-import { $lastVisit } from './lastVisit.js'
-import { $posts } from './posts.js'
-
-export const $newPosts = computed([$lastVisit, $posts], (lastVisit, posts) => {
-  return posts.filter(post => post.publishedAt > lastVisit)
-})
-```
-
 
 ### Tasks
 

@@ -2,8 +2,26 @@ import { clean } from '../clean-stores/index.js'
 
 let listenerQueue = []
 let lqIndex = 0
-const QUEUE_ITEMS_PER_LISTENER = 4
+const QUEUE_ITEMS_PER_LISTENER = 2
 export let epoch = 0
+let isBatching = false
+
+export let batch = (cb) => {
+  if (isBatching) return cb()
+  isBatching = true
+  try {
+    return cb()
+  } finally {
+    try {
+      for (lqIndex = 0; lqIndex < listenerQueue.length; lqIndex += QUEUE_ITEMS_PER_LISTENER) {
+        listenerQueue[lqIndex](listenerQueue[lqIndex + 1])
+      }
+    } finally {
+      listenerQueue.length = 0
+      isBatching = false
+    }
+  }
+}
 
 export let atom = (initialValue) => {
   let listeners = []
@@ -14,9 +32,19 @@ export let atom = (initialValue) => {
       }
       return $atom.value
     },
+    isEqual: Object.is,
     lc: 0,
-    listen(listener) {
+    listen(_listener) {
+      let listener = (changedKey) => {
+        let value = $atom.get()
+        if ($atom.isEqual(oldValue, value)) return
+        let currentOldValue = oldValue
+        oldValue = value
+        _listener(value, currentOldValue, changedKey)
+      }
       $atom.lc = listeners.push(listener)
+      // Must come after updating `lc` otherwise get() will call back into listen() when lc is 0.
+      let oldValue = $atom.get()
 
       return () => {
         for (let i = lqIndex + QUEUE_ITEMS_PER_LISTENER; i < listenerQueue.length;) {
@@ -34,41 +62,26 @@ export let atom = (initialValue) => {
         }
       }
     },
-    notify(oldValue, changedKey) {
+    notify(changedKey) {
       epoch++
-      let runListenerQueue = !listenerQueue.length
-      for (let listener of listeners) {
-        listenerQueue.push(
-          listener,
-          $atom.value,
-          oldValue,
-          changedKey
-        )
-      }
-
-      if (runListenerQueue) {
-        for (lqIndex = 0; lqIndex < listenerQueue.length; lqIndex += QUEUE_ITEMS_PER_LISTENER) {
-            listenerQueue[lqIndex](
-              listenerQueue[lqIndex + 1],
-              listenerQueue[lqIndex + 2],
-              listenerQueue[lqIndex + 3]
-            )
+      batch(() => {
+        for (let listener of listeners) {
+          listenerQueue.push(listener, changedKey)
         }
-        listenerQueue.length = 0
-      }
+      })
     },
     /* It will be called on last listener unsubscribing.
        We will redefine it in onMount and onStop. */
     off() {},
     set(newValue) {
-      let oldValue = $atom.value
-      if (oldValue !== newValue) {
+      if (!$atom.isEqual($atom.value, newValue)) {
         $atom.value = newValue
-        $atom.notify(oldValue)
+        $atom.notify()
       }
     },
     subscribe(listener) {
       let unbind = $atom.listen(listener)
+      // The call to listen() above calls $atom.get(), so we know $atom.value isn't stale
       listener($atom.value)
       return unbind
     },
